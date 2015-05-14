@@ -137,7 +137,7 @@ u16 clock_time, clock_temp;
 u8 series_step;
 
 u16 adc[4];
-u8 SIZE, LENGTH, VARI;
+u8 GRID, ARC, SIZE, LENGTH, VARI;
 
 typedef void(*re_t)(void);
 re_t re;
@@ -156,6 +156,7 @@ static nvram_data_t flashy;
 static void refresh(void);
 static void refresh_mono(void);
 static void refresh_preset(void);
+static void refresh_arc(void);
 static void clock(u8 phase);
 
 // start/stop monome polling/refresh timers
@@ -530,6 +531,8 @@ static void handler_MonomeConnect(s32 data) {
 	// print_dbg("\r\n// monome connect /////////////////"); 
 	keycount_pos = 0;
 	key_count = 0;
+    GRID = monome_device() == eDeviceGrid;
+    ARC = monome_device() == eDeviceArc;
 	SIZE = monome_size_x();
 	LENGTH = SIZE - 1;
 	// print_dbg("\r monome size: ");
@@ -554,8 +557,12 @@ static void handler_MonomeConnect(s32 data) {
 static void handler_MonomePoll(s32 data) { monome_read_serial(); }
 static void handler_MonomeRefresh(s32 data) {
 	if(monomeFrameDirty) {
-		if(preset_mode == 0) (*re)(); //refresh_mono();
-		else refresh_preset();
+        if (GRID) {
+            if(preset_mode == 0) (*re)(); //refresh_mono();
+            else refresh_preset();
+        } else if (ARC) {
+            refresh_arc();
+        }
 
 		(*monome_refresh)();
 	}
@@ -1721,6 +1728,11 @@ static void refresh_mono() {
 
 	monome_set_quadrant_flag(0);
 	monome_set_quadrant_flag(1);
+}
+
+
+static void refresh_arc() {
+    
 }
 
 
