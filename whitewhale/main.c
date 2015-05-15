@@ -34,6 +34,7 @@
 	
 
 #define FIRSTRUN_KEY 0x22
+#define ENCODER_DELTA_SENSITIVITY 40
 
 
 const u16 SCALES[24][16] = {
@@ -87,6 +88,7 @@ typedef struct {
 	u16 cv_steps[2][16];
 	u16 cv_curves[2][16];
 	u8 cv_probs[2][16];
+	u8 swing;
 } whale_pattern;
 
 typedef struct {
@@ -138,6 +140,7 @@ u8 series_step;
 
 u16 adc[4];
 u8 GRID, ARC, SIZE, LENGTH, VARI;
+u16 encoderDelta[4] = {0, 0, 0, 0};
 
 typedef void(*re_t)(void);
 re_t re;
@@ -1228,6 +1231,19 @@ static void handler_MonomeGridKey(s32 data) {
 	}
 }
 
+
+static void handler_MonomeRingEnc(s32 data) { 
+	u8 n;
+	s8 delta;
+	monome_ring_enc_parse_event_data(data, &n, &delta);
+	
+	encoderDelta[n] += abs(delta);
+	if (encoderDelta[n] < ENCODER_DELTA_SENSITIVITY)
+		return;
+	
+	encoderDelta[n] = 0;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // application grid redraw
 static void refresh() {
@@ -1733,6 +1749,10 @@ static void refresh_mono() {
 
 static void refresh_arc() {
     
+	monome_set_quadrant_flag(0);
+	monome_set_quadrant_flag(1);
+	monome_set_quadrant_flag(2);
+	monome_set_quadrant_flag(3);
 }
 
 
@@ -1769,6 +1789,7 @@ static inline void assign_main_event_handlers(void) {
 	app_event_handlers[ kEventMonomePoll ]	= &handler_MonomePoll ;
 	app_event_handlers[ kEventMonomeRefresh ]	= &handler_MonomeRefresh ;
 	app_event_handlers[ kEventMonomeGridKey ]	= &handler_MonomeGridKey ;
+	app_event_handlers[ kEventMonomeRingEnc ]	= &handler_MonomeRingEnc ;
 }
 
 // app event loop
