@@ -20,7 +20,7 @@
 static const char * errordesc[] = {
 	"OK",
 	WELCOME,
-	"UNKOWN WORD",
+	"UNKNOWN WORD",
 	"COMMAND TOO LONG",
 	"NOT ENOUGH PARAMS",
 	"TOO MANY PARAMS",
@@ -35,13 +35,15 @@ const char * tele_error(error_t e) {
 	return errordesc[e];
 }
 
-static char dbg[32];
+// static char dbg[32];
 static char pcmd[32];
 
 
 int16_t output, output_new;
 
 char error_detail[16];
+
+uint8_t mutes[8];
 
 tele_command_t temp;
 tele_pattern_t tele_patterns[4];
@@ -65,7 +67,13 @@ volatile update_cv_off_t update_cv_off;
 volatile update_ii_t update_ii;
 volatile update_scene_t update_scene;
 volatile update_pi_t update_pi;
+volatile update_kill_t update_kill;
+volatile update_mute_t update_mute;
+volatile update_input_t update_input;
 
+volatile run_script_t run_script;
+
+volatile uint8_t input_states[8];
 
 const char * to_v(int16_t);
 
@@ -97,7 +105,7 @@ void push(int16_t data) {
 // VARS ARRAYS KEYS /////////////////////////////////////////////
 
 
-#define KEYS 30
+#define KEYS 46
 static tele_key_t tele_keys[KEYS] = {
 	{"WW.PRESET",WW_PRESET},
 	{"WW.POS",WW_POS},
@@ -128,7 +136,23 @@ static tele_key_t tele_keys[KEYS] = {
 	{"ES.TRANS",ES_TRANS},
 	{"ES.STOP",ES_STOP},
 	{"ES.TRIPLE",ES_TRIPLE},
-	{"ES.MAGIC",ES_MAGIC}
+	{"ES.MAGIC",ES_MAGIC},
+	{"OR.TRK",ORCA_TRACK},
+	{"OR.CLK",ORCA_CLOCK},
+	{"OR.DIV",ORCA_DIVISOR},
+	{"OR.PHASE",ORCA_PHASE},
+	{"OR.RST",ORCA_RESET},
+	{"OR.WGT",ORCA_WEIGHT},
+	{"OR.MUTE",ORCA_MUTE},
+	{"OR.SCALE",ORCA_SCALE},
+	{"OR.BANK",ORCA_BANK},
+	{"OR.PRESET",ORCA_PRESET},
+	{"OR.RELOAD",ORCA_RELOAD},
+	{"OR.ROTS",ORCA_ROTATES},
+	{"OR.ROTW",ORCA_ROTATEW},
+	{"OR.GRST",ORCA_GRESET},
+	{"OR.CVA",ORCA_CVA},
+	{"OR.CVB",ORCA_CVB}
 };
 
 
@@ -153,10 +177,11 @@ static void v_Q(uint8_t);
 static void v_Q_N(uint8_t);
 static void v_Q_AVG(uint8_t);
 static void v_SCENE(uint8_t);
+static void v_FLIP(uint8_t);
 
 static int16_t tele_q[16];
 
-#define VARS 31
+#define VARS 39
 static tele_var_t tele_vars[VARS] = {
 	{"I",NULL,0},	// gets overwritten by ITER
 	{"TIME",NULL,0},
@@ -188,7 +213,15 @@ static tele_var_t tele_vars[VARS] = {
 	{"P.PREV",v_P_PREV,0},
 	{"P.WRAP",v_P_WRAP,0},
 	{"P.START",v_P_START,0},
-	{"P.END",v_P_END,0}
+	{"P.END",v_P_END,0},
+	{"FLIP",v_FLIP,0},
+	{"O.MIN",NULL,0},
+	{"O.MAX",NULL,63},
+	{"O.WRAP",NULL,1},
+	{"O.DIR",NULL,1},
+	{"DRUNK.MIN",NULL,0},
+	{"DRUNK.MAX",NULL,255},
+	{"DRUNK.WRAP",NULL,0}
 };
 
 static void v_M(uint8_t n) {
@@ -351,8 +384,21 @@ static void v_P_END(uint8_t n) {
 
 static void v_O(uint8_t n) {
 	if(left || top == 0) {
+		tele_vars[V_O].v += tele_vars[V_O_DIR].v;
+		if(tele_vars[V_O].v > tele_vars[V_O_MAX].v) {
+			if(tele_vars[V_O_WRAP].v)
+				tele_vars[V_O].v = tele_vars[V_O_MIN].v;
+			else
+				tele_vars[V_O].v = tele_vars[V_O_MAX].v;
+		}
+		else if(tele_vars[V_O].v < tele_vars[V_O_MIN].v) {
+			if(tele_vars[V_O_WRAP].v)
+				tele_vars[V_O].v = tele_vars[V_O_MAX].v;
+			else
+				tele_vars[V_O].v = tele_vars[V_O_MIN].v;
+		}
+
 		push(tele_vars[V_O].v);
-		tele_vars[V_O].v++;
 	}
 	else {
 		tele_vars[V_O].v = pop();
@@ -361,8 +407,20 @@ static void v_O(uint8_t n) {
 
 static void v_DRUNK(uint8_t n) {
 	if(left || top == 0) {
-		push(tele_vars[V_DRUNK].v);
 		tele_vars[V_DRUNK].v += (rand() % 3) - 1;
+		if(tele_vars[V_DRUNK].v < tele_vars[V_DRUNK_MIN].v) {
+			if(tele_vars[V_DRUNK_WRAP].v)
+				tele_vars[V_DRUNK].v = tele_vars[V_DRUNK_MAX].v;
+			else
+				tele_vars[V_DRUNK].v = tele_vars[V_DRUNK_MIN].v;
+		}
+		else if(tele_vars[V_DRUNK].v > tele_vars[V_DRUNK_MAX].v) {
+			if(tele_vars[V_DRUNK_WRAP].v)
+				tele_vars[V_DRUNK].v = tele_vars[V_DRUNK_MIN].v;
+			else
+				tele_vars[V_DRUNK].v = tele_vars[V_DRUNK_MAX].v;
+		}
+		push(tele_vars[V_DRUNK].v);
 	}
 	else {
 		tele_vars[V_DRUNK].v = pop();
@@ -393,7 +451,7 @@ static void v_Q_N(uint8_t n) {
 
 static void v_Q_AVG(uint8_t n) {
 	if(left || top == 0) {
-		int16_t avg = 0;
+		int32_t avg = 0;
 		for(int16_t i = 0;i<tele_vars[V_Q_N].v;i++)
 			avg += tele_q[i];
 		avg /= tele_vars[V_Q_N].v;
@@ -415,6 +473,15 @@ static void v_SCENE(uint8_t n) {
 		(*update_scene)(tele_vars[V_SCENE].v);
 	}
 }
+static void v_FLIP(uint8_t n) {
+	if(left || top == 0) {
+		push(tele_vars[V_O].v);
+		tele_vars[V_O].v = (tele_vars[V_O].v == 0);
+	}
+	else {
+		tele_vars[V_O].v = (pop() != 0);
+	}
+}
 
 
 
@@ -423,20 +490,23 @@ static void a_CV(uint8_t);
 static void a_CV_SLEW(uint8_t);
 static void a_CV_OFF(uint8_t);
 static void a_TR_TIME(uint8_t);
+static void a_TR_POL(uint8_t);
 
 #define MAKEARRAY(name, func) {#name, {0,0,0,0}, func}
-#define ARRAYS 5
+#define ARRAYS 6
 static tele_array_t tele_arrays[ARRAYS] = {
 	MAKEARRAY(TR,a_TR),
 	MAKEARRAY(CV,a_CV),
 	MAKEARRAY(CV.SLEW,a_CV_SLEW),
 	MAKEARRAY(CV.OFF,a_CV_OFF),
-	{"TR.TIME", {100,100,100,100}, a_TR_TIME}
+	{"TR.TIME", {100,100,100,100}, a_TR_TIME},
+	{"TR.POL", {1,1,1,1}, a_TR_POL}
 };
 
 static void a_TR(uint8_t i) {
 	int16_t a = pop();
 	a = (a != 0);
+
 	tele_arrays[0].v[i] = a;
 	(*update_tr)(i, a);
 }
@@ -466,7 +536,12 @@ static void a_TR_TIME(uint8_t i) {
 	if(a<1) a = 1;
 	tele_arrays[4].v[i] = a;
 }
-
+static void a_TR_POL(uint8_t i) {
+	int16_t a = pop();
+	if(a>1) a = 1;
+	else if(a<0) a = 0;
+	tele_arrays[5].v[i] = a;
+}
 
 
 /////////////////////////////////////////////////////////////////
@@ -501,8 +576,8 @@ static void process_delays(uint8_t v) {
 			tr_pulse[i] -= v;
 			if(tr_pulse[i] <= 0) {
 				tr_pulse[i] = 0;
-				if(tele_arrays[0].v[i]) tele_arrays[0].v[i] = 0;
-				else tele_arrays[0].v[i] = 1;
+				// if(tele_arrays[0].v[i]) tele_arrays[0].v[i] = 0;
+				tele_arrays[0].v[i] = (tele_arrays[5].v[i] == 0);
 				(*update_tr)(i,tele_arrays[0].v[i]);
 			}
 		}
@@ -510,11 +585,19 @@ static void process_delays(uint8_t v) {
 }
 
 void clear_delays(void) {
+	for(int16_t i=0;i<4;i++)
+		tr_pulse[i] = 0;
+
 	for(int16_t i=0;i<TELE_D_SIZE;i++) {
 		delay_t[i] = 0;
 	}
 
 	delay_count = 0;
+
+	tele_stack_top = 0;
+
+	(*update_delay)(0);
+	(*update_s)(0);
 }
 
 
@@ -559,6 +642,8 @@ void mod_PROB(tele_command_t *c) {
 void mod_DEL(tele_command_t *c) {
 	int16_t i = 0;
 	int16_t a = pop();
+
+	if(a < 1) a = 1;
 
 	while(delay_t[i] != 0 && i != TELE_D_SIZE)
 		i++;
@@ -698,9 +783,22 @@ static void op_RSH(void);
 static void op_LSH(void);
 static void op_S_L(void);
 static void op_CV_SET(void);
+static void op_EXP(void);
+static void op_ABS(void);
+static void op_AND(void);
+static void op_OR(void);
+static void op_XOR(void);
+static void op_JI(void);
+static void op_SCRIPT(void);
+static void op_KILL(void);
+static void op_MUTE(void);
+static void op_UNMUTE(void);
+static void op_SCALE(void);
+static void op_STATE(void);
+
 
 #define MAKEOP(name, params, returns, doc) {#name, op_ ## name, params, returns, doc}
-#define OPS 41
+#define OPS 53
 // DO NOT INSERT in the middle. there's a hack in validate() for P and PN
 static const tele_op_t tele_ops[OPS] = {
 	MAKEOP(ADD, 2, 1,"[A B] ADD A TO B"),
@@ -743,7 +841,19 @@ static const tele_op_t tele_ops[OPS] = {
 	{"RSH", op_RSH, 2, 1, "RIGHT SHIFT"},
 	{"LSH", op_LSH, 2, 1, "LEFT SHIFT"},
 	{"S.L", op_S_L, 0, 1, "STACK LENGTH"},
-	{"CV.SET", op_CV_SET, 2, 0, "CV SET"}
+	{"CV.SET", op_CV_SET, 2, 0, "CV SET"},
+	MAKEOP(EXP, 1, 1, "EXPONENTIATE"),
+	MAKEOP(ABS, 1, 1, "ABSOLUTE VALUE"),
+	MAKEOP(AND, 2, 1,"LOGIC: AND"),
+	MAKEOP(OR, 2, 1,"LOGIC: OR"),
+	MAKEOP(XOR, 2, 1,"LOGIC: XOR"),
+	MAKEOP(JI, 2, 1,"JUST INTONE DIVISON"),
+	MAKEOP(SCRIPT, 1, 0,"CALL SCRIPT"),
+	MAKEOP(KILL, 0, 0,"CLEAR DELAYS, STACK, SLEW"),
+	MAKEOP(MUTE, 1, 0,"MUTE INPUT"),
+	MAKEOP(UNMUTE, 1, 0,"UNMUTE INPUT"),
+	MAKEOP(SCALE, 5, 1,"SCALE NUMBER RANGES"),
+	MAKEOP(STATE, 1, 1,"GET INPUT STATE")
 };
 
 static void op_ADD() {
@@ -949,13 +1059,13 @@ static void op_P() {
 	}
 	if(a > 63) a = 63;
 
-	if(top == 0) {
-		push(tele_patterns[pn].v[a]);
-	}
-	else if(top == 1) {
+	if(left == 0 && top > 0) {
 		b = pop();
 		tele_patterns[pn].v[a] = b;
 		(*update_pi)();
+	}
+	else {
+		push(tele_patterns[pn].v[a]);
 	}
 }
 static void op_P_INS() {
@@ -1005,7 +1115,7 @@ static void op_P_PUSH() {
 	int16_t a;
 	a = pop();
 
-	if(tele_patterns[pn].l < 63) {
+	if(tele_patterns[pn].l < 64) {
 		tele_patterns[pn].v[tele_patterns[pn].l] = a;
 		tele_patterns[pn].l++;
 		(*update_pi)();
@@ -1035,13 +1145,13 @@ static void op_PN() {
 	}
 	if(b > 63) b = 63;
 
-	if(top == 0) {
-		push(tele_patterns[a].v[b]);
-	}
-	else if(top == 1) {
+	if(left == 0 && top > 0) {
 		c = pop();
 		tele_patterns[a].v[b] = c;
 		(*update_pi)();
+	}
+	else {
+		push(tele_patterns[a].v[b]);
 	}
 }
 static void op_TR_PULSE() {
@@ -1050,8 +1160,7 @@ static void op_TR_PULSE() {
 	if(a < 1) a = 1;
 	else if(a > 4) a = 4;
 	a--;
-	if(tele_arrays[0].v[a]) tele_arrays[0].v[a] = 0;
-	else tele_arrays[0].v[a] = 1;
+	tele_arrays[0].v[a] = tele_arrays[5].v[a];
 	tr_pulse[a] = tele_arrays[4].v[a]; // set time
 	update_tr(a,tele_arrays[0].v[a]);
 }
@@ -1081,6 +1190,88 @@ static void op_CV_SET() {
 	tele_arrays[1].v[a] = b;
 	(*update_cv)(a, b, 0);
 }
+static void op_EXP() {
+	int16_t a = pop();
+	if(a > 16383) a = 16383;
+	else if(a < -16383) a = -16383;
+
+	a = a >> 6;
+
+	if(a < 0) {
+		a = -a;
+		push(-table_exp[a]);
+	}
+	else 
+		push(table_exp[a]);
+}
+static void op_ABS() {
+	int16_t a = pop();
+
+	if(a < 0)
+		push(-a);
+	else 
+		push(a);
+}
+static void op_AND() {
+	push(pop() & pop());
+}
+static void op_OR() {
+	push(pop() | pop());
+}
+static void op_XOR() {
+	push(pop() ^ pop());
+}
+static void op_JI() { 
+	uint32_t ji = (((pop()<<8) / pop()) * 1684) >> 8;
+	while(ji > 1683)
+		ji >>= 1;
+	push(ji);
+}
+static void op_SCRIPT() {
+	uint16_t a = pop();
+	if(a > 0 && a < 9)
+		(*run_script)(a);
+}
+static void op_KILL() {
+	clear_delays();
+	(*update_kill)();
+}
+static void op_MUTE() {
+	int16_t a;
+	a = pop();
+
+	if(a > 0 && a < 9) {
+		(*update_mute)(a-1,0);
+	}
+}
+static void op_UNMUTE() {
+	int16_t a;
+	a = pop();
+
+	if(a > 0 && a < 9) {
+		(*update_mute)(a-1,1);
+	}
+}
+static void op_SCALE() {
+	int16_t a, b, x, y, i;
+	a = pop();
+	b = pop();
+	x = pop();
+	y = pop();
+	i = pop();
+
+	push((i-a) * (y-x) / (b-a) + x);
+}
+static void op_STATE() {
+	int16_t a = pop();
+	a--;
+	if(a<0) a=0;
+	else if(a>7) a=7;
+
+	(*update_input)(a);
+	push(input_states[a]);	
+}
+
 
 /////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////
@@ -1361,7 +1552,7 @@ void process(tele_command_t *c) {
 			i = pop();
 
 			// saturate for 1-4 indexing
-			if(i<1) i=0;
+			if(i<1) i=1;
 			else if(i>3) i=4;
 			i--;
 
@@ -1388,8 +1579,8 @@ void process(tele_command_t *c) {
 	if(top) {
 		output = pop();
 		output_new++;
-		sprintf(dbg,"\r\n>>> %d", output);
-		DBG
+		// sprintf(dbg,"\r\n>>> %d", output);
+		// DBG
 		// to_v(output);
 	}
 }
@@ -1462,7 +1653,6 @@ void tele_set_val(uint8_t i, uint16_t v) {
 	tele_vars[i].v = v;
 }
 
-
 void tele_tick(uint8_t i) {
 	process_delays(i);
 
@@ -1481,6 +1671,9 @@ void tele_init() {
 		tele_patterns[i].start = 0;
 		tele_patterns[i].end = 63;
 	}
+
+	for(i=0;i<8;i++)
+		mutes[i] = 1;
 }
 
 

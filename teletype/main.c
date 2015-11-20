@@ -1,4 +1,5 @@
 #include <stdio.h>	//sprintf
+#include <ctype.h>  //toupper
 #include <string.h> //memcpy
 
 // asf
@@ -12,6 +13,13 @@
 #include "gpio.h"
 #include "spi.h"
 #include "sysclk.h"
+#include "uhi_msc.h"
+#include "fat.h"
+#include "file.h"
+#include "fs_com.h"
+#include "navigation.h"
+#include "usb_protocol_msc.h"
+#include "uhi_msc_mem.h"
 
 // system
 #include "types.h"
@@ -45,8 +53,11 @@
 #define SCENE_SLOTS 32
 #define SCENE_SLOTS_ 31
 
+#define SCENE_TEXT_LINES 32
+#define SCENE_TEXT_CHARS 32
 
-uint8_t preset, preset_select, front_timer, preset_edit_line, preset_edit_offset, offset_view;
+
+uint8_t preset, preset_select, front_timer, preset_edit_line, preset_edit_offset, offset_view, last_mode;
 
 u16 adc[4];
 
@@ -62,6 +73,10 @@ typedef struct {
 
 aout_t aout[4];
 
+volatile uint8_t input_states[8];
+
+u8 mutes[8];
+
 error_t status;
 
 char input[32];
@@ -75,7 +90,7 @@ uint8_t knob_last;
 tele_script_t script[10];
 tele_script_t history;
 uint8_t edit, edit_line, edit_index, edit_pattern, offset_index;
-char scene_text[32][SCENE_SLOTS];
+char scene_text[SCENE_TEXT_LINES][SCENE_TEXT_CHARS];
 
 uint8_t metro_act;
 unsigned int metro_time;
@@ -99,12 +114,13 @@ uint8_t help_length[8] = {HELP1_LENGTH, HELP2_LENGTH, HELP3_LENGTH, HELP4_LENGTH
 typedef const struct {
 	tele_script_t script[10];
 	tele_pattern_t patterns[4];
-	char text[32][SCENE_SLOTS];
+	char text[SCENE_TEXT_LINES][SCENE_TEXT_CHARS];
 } tele_scene_t;
 
 typedef const struct {
 	tele_scene_t s[SCENE_SLOTS];
 	uint8_t scene;
+	uint8_t mode;
 	uint8_t fresh;
 } nvram_data_t;
 
@@ -137,6 +153,7 @@ uint8_t r_edit_dirty;
 #define A_Q 0x10
 #define A_X 0x20
 #define A_REFRESH 0x40
+#define A_MUTES 0x80
 uint8_t activity;
 uint8_t activity_prev;
 
@@ -179,6 +196,8 @@ static void flash_read(void);
 
 static void render_init(void);
 
+static void set_mode(uint8_t);
+
 static void tele_metro(int16_t, int16_t, uint8_t);
 static void tele_tr(uint8_t i, int16_t v);
 static void tele_cv(uint8_t i, int16_t v, uint8_t s);
@@ -189,7 +208,13 @@ static void tele_cv_off(uint8_t i, int16_t v);
 static void tele_ii(uint8_t i, int16_t d);
 static void tele_scene(uint8_t i);
 static void tele_pi(void);
+static void tele_script(uint8_t a);
+static void tele_kill(void);
+static void tele_mute(uint8_t, uint8_t);
+static void tele_input_state(uint8_t);
 
+static void tele_usb_disk(void);
+static void tele_mem_clear(void);
 
 ////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
@@ -333,7 +358,12 @@ static void metroTimer_callback(void* o) {
 
 
 
-////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
 // event handlers
 
 static void handler_Front(s32 data) {
@@ -343,16 +373,15 @@ static void handler_Front(s32 data) {
 		if(mode != M_PRESET_R) {
 			front_timer = 0;
 			knob_last = adc[1]>>7;
-			mode = M_PRESET_R;
-			r_edit_dirty = R_ALL;
+			last_mode = mode;
+			set_mode(M_PRESET_R);
 		}
 		else
 			front_timer = 15;
 	}
 	else {
 		if(front_timer) {
-			mode = M_LIVE;
-			r_edit_dirty = R_ALL;
+			set_mode(last_mode);
 		}
 		front_timer = 0;
 	}
@@ -396,8 +425,10 @@ static void handler_KeyTimer(s32 data) {
 		if(front_timer == 1) {
 			flash_read();
 
-			mode = M_LIVE;
-			r_edit_dirty = R_ALL;
+			for(int i=0;i<script[INIT_SCRIPT].l;i++)
+				process(&script[INIT_SCRIPT].c[i]);
+
+			set_mode(last_mode);
 
 			front_timer--;
 		}
@@ -489,6 +520,15 @@ static void handler_HidDisconnect(s32 data) {
 
 }
 
+
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+// keys
+
 static void handler_HidTimer(s32 data) {
 	u8 i,n;
 
@@ -523,72 +563,44 @@ static void handler_HidTimer(s32 data) {
      			// print_dbg_hex(frame[0]);
      			switch(frame[i]) {
      				case 0x2B: // tab
-     					if(mode == M_LIVE) {
-     						mode = M_EDIT;
- 							edit_line = 0;
-	     					strcpy(input,print_command(&script[edit].c[edit_line]));
-	 						pos = strlen(input);
-	 						for(n = pos;n < 32;n++) input[n] = 0;
-     						r_edit_dirty |= R_LIST | R_MESSAGE;
-     					}
-     					else {
-     						for(n = 0;n < 32;n++) input[n] = 0;
-		 					pos = 0;
-     						mode = M_LIVE;
-     						edit_line = SCRIPT_MAX_COMMANDS;
-     						activity |= A_REFRESH;
-     						r_edit_dirty |= R_LIST | R_MESSAGE;
-     					}
+     					if(mode == M_LIVE)
+     						set_mode(M_EDIT);
+     					else
+     						set_mode(M_LIVE);
      					break;
      				case 0x35: // ~
-     					if(mode == M_TRACK) {
-     						for(n = 0;n < 32;n++) input[n] = 0;
-		 					pos = 0;
-     						mode = M_LIVE;
-     						edit_line = SCRIPT_MAX_COMMANDS;
-     						activity |= A_REFRESH;
-     						r_edit_dirty |= R_LIST | R_MESSAGE;
-     					}
+     					if(mode == M_TRACK)
+     						set_mode(last_mode);
      					else {
-     						mode = M_TRACK;
-     						r_edit_dirty = R_ALL;
+     						last_mode = mode;
+     						set_mode(M_TRACK);
      					}
      					break;
      				case 0x29: // ESC
      					if(mod_ALT) {
-     						preset_edit_line = 0;
-     						preset_edit_offset = 0;
-     						strcpy(input,scene_text[preset_edit_line + preset_edit_offset]);
-     						pos = strlen(input);
-     						mode = M_PRESET_W;
-     						r_edit_dirty = R_ALL;
+     						last_mode = mode;
+     						set_mode(M_PRESET_W);
      					}
-     					else if(mode == M_PRESET_R) {
-     						for(n = 0;n < 32;n++) input[n] = 0;
-		 					pos = 0;
-     						edit_line = SCRIPT_MAX_COMMANDS;
-     						mode = M_LIVE;
-     						r_edit_dirty = R_ALL;
+     					else if(mod_META) {
+     						clear_delays();
+     						for(int i=0;i<4;i++) {
+     							aout[i].step = 1;
+     						}
      					}
+     					else if(mode == M_PRESET_R)
+     						set_mode(last_mode);
      					else {
-     						preset_edit_offset = 0;
-     						knob_last = adc[1]>>7;
-     						mode = M_PRESET_R;
-     						r_edit_dirty = R_ALL;
+     						last_mode = mode;
+     						set_mode(M_PRESET_R);
      					}
 
      					break;
      				case 0x3A: // F1
-     					if(mode == M_HELP) {
-     						for(n = 0;n < 32;n++) input[n] = 0;
-		 					pos = 0;
-     						edit_line = SCRIPT_MAX_COMMANDS;
-     						mode = M_LIVE;
-     						r_edit_dirty = R_ALL;
-     					}
+     					if(mode == M_HELP) 
+     						set_mode(last_mode);
      					else {
-     						mode = M_HELP;
-     						r_edit_dirty = R_ALL;
+     						last_mode = mode;
+     						set_mode(M_HELP);
      					}
      					break;
      				case 0x51: // down
@@ -652,7 +664,7 @@ static void handler_HidTimer(s32 data) {
 	 						}
 	 					}
 	 					else if(mode == M_LIVE) {
-	 						edit_line++;
+	 						edit_line=SCRIPT_MAX_COMMANDS;
 	 						pos = 0;
      						for(n = 0;n < 32;n++) input[n] = 0;
 	 					}
@@ -945,9 +957,7 @@ static void handler_HidTimer(s32 data) {
  								flash_write();
  								for(n = 0;n < 32;n++) input[n] = 0;
 		 							pos = 0;
- 								mode = M_LIVE;
- 								edit_line = SCRIPT_MAX_COMMANDS;
- 								r_edit_dirty |= R_ALL;
+ 								set_mode(last_mode);
 	     					}
 	     					else {
 		     					strcpy(scene_text[preset_edit_line+preset_edit_offset],input);
@@ -971,9 +981,7 @@ static void handler_HidTimer(s32 data) {
 
 							for(n = 0;n < 32;n++) input[n] = 0;
 	 							pos = 0;
-							mode = M_LIVE;
-							edit_line = SCRIPT_MAX_COMMANDS;
-							r_edit_dirty |= R_ALL;
+							set_mode(last_mode);
 	     				}
 	     				else if(mode == M_TRACK) {
 	     					if(mod_SH) {
@@ -1134,27 +1142,24 @@ static void handler_HidTimer(s32 data) {
 
 	     				}
 	     				else if(mod_META) {
-	     					if(frame[i] == ESCAPE) {
-	     						// kill slews/delays/etc
-	     					}else if(frame[i] == TILDE) {
-	     						// mute triggers
-	     					}
-	     					else {
-	     						n = hid_to_ascii_raw(frame[i]);
+     						n = hid_to_ascii_raw(frame[i]);
 
-	     						if(n > 0x30 && n < 0x039) {
-	     							for(int i=0;i<script[n - 0x31].l;i++)
-										process(&script[n - 0x31].c[i]);
-	     						}
-	     						else if(n == 'M') {
-	     							for(int i=0;i<script[METRO_SCRIPT].l;i++)
-										process(&script[METRO_SCRIPT].c[i]);
-	     						}
-	     						else if(n == 'I') {
-	     							for(int i=0;i<script[INIT_SCRIPT].l;i++)
-										process(&script[INIT_SCRIPT].c[i]);
-	     						}
-	     					}
+     						if(n > 0x30 && n < 0x039) {
+     							if(mod_SH) {
+     								mutes[n-0x31] ^= 1;
+     								activity |= A_MUTES;
+     							}
+     							else
+     								tele_script(n - 0x30);
+     						}
+     						else if(n == 'M') {
+     							for(int i=0;i<script[METRO_SCRIPT].l;i++)
+									process(&script[METRO_SCRIPT].c[i]);
+     						}
+     						else if(n == 'I') {
+     							for(int i=0;i<script[INIT_SCRIPT].l;i++)
+									process(&script[INIT_SCRIPT].c[i]);
+     						}
 	     				}
 	     				else if(mode == M_TRACK) {
 	     					n = hid_to_ascii(frame[i], frame[0]);
@@ -1190,7 +1195,10 @@ static void handler_HidTimer(s32 data) {
      						}
 	     				}
 	     				else {	/// NORMAL TEXT ENTRY
-	 						if(pos<31) {
+	     					if(frame[i] > 0x58 && frame[i] < 0x61) {
+	     						tele_script(frame[i] - 0x58);
+	     					}
+	 						if(pos<29) {
 		     					// print_dbg_char(hid_to_ascii(frame[i], frame[0]));
 		     					n = hid_to_ascii(frame[i], frame[0]);
 		     					if(n) {
@@ -1231,14 +1239,24 @@ static void handler_HidPacket(s32 data) {
 
 
 static void handler_Trigger(s32 data) {
-	uint8_t i;
 	// print_dbg("*");
 
 	// for(int n=0;n<script.l;n++)
-	for(i=0;i<script[data].l;i++) {
-		process(&script[data].c[i]);
-	}
+	if(mutes[data])
+		for(int i=0;i<script[data].l;i++) {
+			process(&script[data].c[i]);
+		}
 }
+
+
+
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+// refresh
 
 static void handler_ScreenRefresh(s32 data) {
 	static uint8_t a;
@@ -1291,7 +1309,8 @@ static void handler_ScreenRefresh(s32 data) {
 	else if(mode == M_PRESET_W) {
 		if(r_edit_dirty & R_ALL) {
 			
-			itoa(preset_select,s,10);
+			strcpy(s,">>> ");
+			itoa(preset_select,s+4,10);
 			region_fill(&line[0], 1);
 			font_string_region_clip_right(&line[0], s, 126, 0, 0xf, 1);
 			font_string_region_clip(&line[0], "WRITE", 2, 0, 0xf, 1);
@@ -1356,7 +1375,7 @@ static void handler_ScreenRefresh(s32 data) {
 			sdirty++;
 		}	
 	}
-	else {
+	else if(mode == M_LIVE || mode == M_EDIT) {
 		if(r_edit_dirty & R_INPUT) {
 			s[0] = '>';
 	 		s[1] = ' ';
@@ -1491,12 +1510,24 @@ static void handler_ScreenRefresh(s32 data) {
 			line[0].data[ 122 + 4 + 384 ] = a;
 			line[0].data[ 122 + 4 + 512 ] = a;
 
+			// mutes
+
+			line[0].data[ 87 + 0 + 128 ] = 15 - mutes[0] * 12;
+			line[0].data[ 87 + 1 + 384 ] = 15 - mutes[1] * 12;
+			line[0].data[ 87 + 2 + 128 ] = 15 - mutes[2] * 12;
+			line[0].data[ 87 + 3 + 384 ] = 15 - mutes[3] * 12;
+			line[0].data[ 87 + 4 + 128 ] = 15 - mutes[4] * 12;
+			line[0].data[ 87 + 5 + 384 ] = 15 - mutes[5] * 12;
+			line[0].data[ 87 + 6 + 128 ] = 15 - mutes[6] * 12;
+			line[0].data[ 87 + 7 + 384 ] = 15 - mutes[7] * 12;
+
+			activity &= ~A_MUTES;
+			activity &= ~A_REFRESH;
+
 			activity_prev = activity;
 
 			// activity &= ~A_X;
 
-			activity &= ~A_REFRESH;
-				
 			sdirty++;
 		}
 	}
@@ -1545,8 +1576,58 @@ void check_events(void) {
 
 
 
-////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
 // funcs
+
+void set_mode(uint8_t m) {
+	switch(m) {
+		case M_LIVE:
+			for(int n = 0;n < 32;n++) input[n] = 0;
+			pos = 0;
+			mode = M_LIVE;
+			flashc_memset8((void*)&(f.mode), mode, 1, true);
+			edit_line = SCRIPT_MAX_COMMANDS;
+			activity |= A_REFRESH;
+			r_edit_dirty |= R_LIST | R_MESSAGE;
+			break;
+		case M_EDIT:
+			mode = M_EDIT;
+			edit_line = 0;
+			strcpy(input,print_command(&script[edit].c[edit_line]));
+			pos = strlen(input);
+			for(int n = pos;n < 32;n++) input[n] = 0;
+			r_edit_dirty |= R_LIST | R_MESSAGE;
+			break;
+		case M_TRACK:
+			mode = M_TRACK;
+			flashc_memset8((void*)&(f.mode), mode, 1, true);
+			r_edit_dirty = R_ALL;
+			break;
+		case M_PRESET_W:
+			preset_edit_line = 0;
+			preset_edit_offset = 0;
+			strcpy(input,scene_text[preset_edit_line + preset_edit_offset]);
+			pos = strlen(input);
+			mode = M_PRESET_W;
+			r_edit_dirty = R_ALL;
+			break;
+		case M_PRESET_R:
+			preset_edit_offset = 0;
+			knob_last = adc[1]>>7;
+			mode = M_PRESET_R;
+			r_edit_dirty = R_ALL;
+			break;
+		case M_HELP:
+			mode = M_HELP;
+			r_edit_dirty = R_ALL;
+			break;
+	}
+}
 
 
 u8 flash_is_fresh(void) {
@@ -1635,14 +1716,21 @@ static void tele_tr(uint8_t i, int16_t v) {
 }
 
 static void tele_cv(uint8_t i, int16_t v, uint8_t s) {
-	aout[i].target = v + aout[i].off;
-	if(aout[i].target < 0)
-		aout[i].target = 0;
-	else if(aout[i].target > 16383)
-		aout[i].target = 16383;
- 	if(s) aout[i].step = aout[i].slew;
- 	else aout[i].step = 1;
-	aout[i].delta = ((aout[i].target - aout[i].now)<<16) / aout[i].step;
+	int16_t t = v + aout[i].off;
+	if(t < 0)
+		t = 0;
+	else if(t > 16383)
+		t = 16383;
+	aout[i].target = t;
+ 	if(s) {
+ 		aout[i].step = aout[i].slew;
+ 		aout[i].delta = ((aout[i].target - aout[i].now)<<16) / aout[i].step;
+ 	}
+ 	else {
+ 		aout[i].step = 1;
+ 		aout[i].now = aout[i].target;
+ 	}
+	
 	aout[i].a = aout[i].now<<16;
 }
 
@@ -1689,20 +1777,427 @@ static void tele_pi() {
 		r_edit_dirty |= R_ALL;
 }
 
+int8_t script_caller;
+static void tele_script(uint8_t a) {
+	if(!script_caller) {
+		script_caller = a;
+		for(int i=0;i<script[a-1].l;i++)
+			process(&script[a-1].c[i]);
+	}
+	else if(a != script_caller) {
+		for(int i=0;i<script[a-1].l;i++)
+			process(&script[a-1].c[i]);
+	}
+
+	script_caller = 0;
+}
+
+static void tele_kill() {
+	for(int i = 0;i<4;i++)
+		aout[i].step = 1;
+}
+
+static void tele_mute(uint8_t i, uint8_t s) {
+	mutes[i] = s;
+	activity |= A_MUTES;
+}
 
 
 
 
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+// usb disk
+
+static void tele_usb_disk() {
+	uint8_t usb_retry = 10;
+	print_dbg("\r\nusb");
+	while(usb_retry--) {
+		print_dbg(".");
+
+		if(!uhi_msc_is_available()) {
+			uint8_t lun, lun_state=0;
+
+			for (lun = 0; (lun < uhi_msc_mem_get_lun()) && (lun < 8); lun++) {
+				// print_dbg("\r\nlun: ");
+				// print_dbg_ulong(lun);
+
+				// Mount drive
+				nav_drive_set(lun);
+				if (!nav_partition_mount()) {
+					if (fs_g_status == FS_ERR_HW_NO_PRESENT) {
+						// The test can not be done, if LUN is not present
+						lun_state &= ~(1 << lun); // LUN test reseted
+						continue;
+					}
+					lun_state |= (1 << lun); // LUN test is done.
+					print_dbg("\r\nfail");
+					// ui_test_finish(false); // Test fail
+					continue;
+				}
+				// Check if LUN has been already tested
+				if (lun_state & (1 << lun)) {
+					continue;
+				}
+
+				// WRITE SCENES
+				char filename[13];
+				strcpy(filename,"tt00s.txt");
+
+				print_dbg("\r\nwriting scenes");
+				strcpy(input_buffer,"WRITE");
+				region_fill(&line[0], 0);
+				font_string_region_clip_tab(&line[0], input_buffer, 2, 0, 0xa, 0);
+				region_draw(&line[0]);
+
+				for(int i=0;i<SCENE_SLOTS;i++) {
+					strcat(input_buffer,".");
+					region_fill(&line[0], 0);
+					font_string_region_clip_tab(&line[0], input_buffer, 2, 0, 0xa, 0);
+					region_draw(&line[0]);
+
+					memcpy(&script,&f.s[i].script,sizeof(script));
+					memcpy(&tele_patterns,&f.s[i].patterns,sizeof(tele_patterns));
+					memcpy(&scene_text,&f.s[i].text,sizeof(scene_text));
+
+					if (!nav_file_create((FS_STRING) filename)) {
+						if (fs_g_status != FS_ERR_FILE_EXIST) {
+							if (fs_g_status == FS_LUN_WP) {
+								// Test can be done only on no write protected device
+								continue;
+							}
+							lun_state |= (1 << lun); // LUN test is done.
+							print_dbg("\r\nfail");
+							continue;
+						}
+					}
+					if (!file_open(FOPEN_MODE_W)) {
+						if (fs_g_status == FS_LUN_WP) {
+							// Test can be done only on no write protected device
+							continue;
+						}
+						lun_state |= (1 << lun); // LUN test is done.
+						print_dbg("\r\nfail");
+						continue;
+					}
+
+					char blank=0;
+					for(int l=0;l<SCENE_TEXT_LINES;l++) {
+						if(strlen(scene_text[l])) {
+							file_write_buf((uint8_t*) scene_text[l], strlen(scene_text[l]));
+							file_putc('\n');
+							blank=0;
+						}
+						else if(!blank) { file_putc('\n'); blank=1;}
+					}
+					
+					char input[36];
+					for(int s=0;s<10;s++) {
+						file_putc('\n');
+						file_putc('\n');
+						file_putc('#');
+						if(s==8) file_putc('M');
+						else if(s==9) file_putc('I');
+						else file_putc(s+49);
+
+						for(int l=0;l<script[s].l;l++) {
+							file_putc('\n');
+							strcpy(input,print_command(&script[s].c[l]));
+							file_write_buf((uint8_t*) input,strlen(input));
+						}
+					}
+
+					file_putc('\n');
+					file_putc('\n');
+					file_putc('#');
+					file_putc('P');
+					file_putc('\n');
+
+					for(int b=0;b<4;b++) {
+						itoa(tele_patterns[b].l, input, 10);
+						file_write_buf((uint8_t*) input, strlen(input));
+						if(b==3) file_putc('\n');
+						else file_putc('\t');
+					}
+
+					for(int b=0;b<4;b++) {
+						itoa(tele_patterns[b].wrap, input, 10);
+						file_write_buf((uint8_t*) input, strlen(input));
+						if(b==3) file_putc('\n');
+						else file_putc('\t');
+					}
+
+					for(int b=0;b<4;b++) {
+						itoa(tele_patterns[b].start, input, 10);
+						file_write_buf((uint8_t*) input, strlen(input));
+						if(b==3) file_putc('\n');
+						else file_putc('\t');
+					}
+
+					for(int b=0;b<4;b++) {
+						itoa(tele_patterns[b].end, input, 10);
+						file_write_buf((uint8_t*) input, strlen(input));
+						if(b==3) file_putc('\n');
+						else file_putc('\t');
+					}
+
+					file_putc('\n');
+
+					for(int l=0;l<64;l++) {
+						for(int b=0;b<4;b++) {
+							itoa(tele_patterns[b].v[l], input, 10);
+							file_write_buf((uint8_t*) input, strlen(input));
+							if(b==3) file_putc('\n');
+							else file_putc('\t');
+						}
+					}
+
+					file_close();
+					lun_state |= (1 << lun); // LUN test is done.
+
+					if(filename[3] == '9') {
+						filename[3] = '0';
+						filename[2]++;
+					}
+					else filename[3]++;
+
+					print_dbg(".");
+				}
+
+				nav_filelist_reset();
+
+
+				// READ SCENES
+				strcpy(filename,"tt00.txt");
+				print_dbg("\r\nreading scenes...");
+
+				strcpy(input_buffer,"READ");
+				region_fill(&line[1], 0);
+				font_string_region_clip_tab(&line[1], input_buffer, 2, 0, 0xa, 0);
+				region_draw(&line[1]);
+
+				for(int i=0;i<SCENE_SLOTS;i++) {
+					strcat(input_buffer,".");
+					region_fill(&line[1], 0);
+					font_string_region_clip_tab(&line[1], input_buffer, 2, 0, 0xa, 0);
+					region_draw(&line[1]);
+					if(nav_filelist_findname(filename,0)) {
+						print_dbg("\r\nfound: ");
+						print_dbg(filename);
+						if(!file_open(FOPEN_MODE_R))
+							print_dbg("\r\ncan't open");
+						else {
+							tele_mem_clear();
+
+							char c;
+							uint8_t l = 0;
+							uint8_t p = 0;
+							int8_t s = 99;
+							uint8_t b = 0;
+							uint16_t num = 0;
+							int8_t neg = 1;
+
+							while(!file_eof() && s != -1) {
+								c = toupper(file_getc());
+								// print_dbg_char(c);
+
+								if(c == '#') {
+									if(!file_eof()) {
+										c = toupper(file_getc());
+										// print_dbg_char(c);
+
+										if(c == 'M')
+											s = 8;
+										else if(c == 'I')
+											s = 9;
+										else if(c == 'P')
+											s = 10;
+										else {
+											s = c - 49;
+											if(s < 0 || s > 7)
+												s = -1;
+										}
+
+										l = 0;
+										p = 0;
+
+										if(!file_eof())
+											c = toupper(file_getc());
+									}
+									else s = -1;
+
+									// print_dbg("\r\nsection: ");
+									// print_dbg_ulong(s);
+
+								}
+								// SCENE TEXT
+								else if(s == 99) {
+									if(c == '\n') {
+										l++;
+										p=0;
+									}
+									else {
+										if(l < SCENE_TEXT_LINES && p < SCENE_TEXT_CHARS) {
+											scene_text[l][p] = c;
+											p++;
+										}
+									}
+								}
+								// SCRIPTS
+								else if(s >= 0  && s <= 9) {
+									if(c == '\n') {
+										if(p && l < SCRIPT_MAX_COMMANDS) {
+ 											status = parse(input);
+
+					     					if(status == E_OK) {
+					     						// print_dbg("\r\nparsed: ");
+					     						// print_dbg(input);
+												status = validate(&temp);
+
+												if(status == E_OK) {
+													memcpy(&script[s].c[l], &temp, sizeof(tele_command_t));
+													// print_dbg("\r\nvalidated: ");
+													// print_dbg(print_command(&script[s].c[l]));
+													memset(input,0,sizeof(input));			
+													script[s].l++;
+												}
+												else {
+													print_dbg("\r\nvalidate: ");
+													print_dbg(tele_error(status));
+					 							}
+											}
+											else {
+												print_dbg("\r\nERROR: ");
+												print_dbg(tele_error(status));
+												print_dbg(" >> ");
+												print_dbg(print_command(&script[s].c[l]));
+											}
+
+											l++;
+											p = 0;
+										}
+									}
+									else {
+										if(p < 32)
+											input[p] = c;
+										p++;
+									}
+								}
+								// PATTERNS
+								// tele_patterns[]. l wrap start end v[64]
+								else if(s == 10) {
+									if(c == '\n' || c == '\t') {
+										if(b < 4) {
+											if(l>3) {
+												tele_patterns[b].v[l-4] = neg * num;
+
+												// print_dbg("\r\nset: ");
+												// print_dbg_ulong(b);
+												// print_dbg(" ");
+												// print_dbg_ulong(l-4);
+												// print_dbg(" ");
+												// print_dbg_ulong(num);
+											}
+											else if(l==0) {
+												tele_patterns[b].l = num;
+											}
+											else if(l==1) {
+												tele_patterns[b].wrap = num;
+											}
+											else if(l==2) {
+												tele_patterns[b].start = num;
+											}
+											else if(l==3) {
+												tele_patterns[b].end = num;
+											}
+										}
+
+										b++;
+										num = 0;
+										neg = 1;
+
+										if(c == '\n') {
+											if(p) 
+												l++;
+											if(l > 68)
+												s = -1;
+											b = 0;
+											p = 0;	
+										}
+									}
+									else {
+										if(c == '-')
+											neg = -1;
+										else if(c >= '0' && c <= '9') {
+											num = num * 10 + (c-48);
+											// print_dbg("\r\nnum: ");
+											// print_dbg_ulong(num);
+										}
+										p++;
+									}
+								}
+							} 
+							
+
+							file_close();
+
+							preset_select = i;
+							flash_write();
+						}
+					}
+					else
+						nav_filelist_reset();
+
+					if(filename[3] == '9') {
+						filename[3] = '0';
+						filename[2]++;
+					}
+					else filename[3]++;
+
+					preset_select = 0;
+				}
+			}
+
+			usb_retry = 0;
+
+			nav_exit();
+			region_fill(&line[0], 0);
+			region_fill(&line[1], 0);
+			tele_mem_clear();
+		}
+		delay_ms(100);
+	}
+}
+
+void tele_mem_clear(void) {
+	memset(&script,0,sizeof(script));
+	memset(&tele_patterns,0,sizeof(tele_patterns));
+	memset(&scene_text,0,sizeof(scene_text));
+}
+
+void tele_input_state(uint8_t n) {
+	input_states[n] = gpio_get_pin_value(A00+n);
+}
 
 
 
 
-////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////
 // main
 
 int main(void)
@@ -1736,12 +2231,15 @@ int main(void)
 	tele_init();
 
 	if(flash_is_fresh()) {
-		print_dbg("\r\n:::: first run.");
+		print_dbg("\r\n:::: first run, clearing flash");
 
-		for(preset_select=0;preset_select<SCENE_SLOTS;preset_select++)
+		for(preset_select=0;preset_select<SCENE_SLOTS;preset_select++) {
 			flash_write();
+			print_dbg(".");
+		}
 		preset_select = 0;
 		flashc_memset8((void*)&(f.scene), preset_select, 1, true);
+		flashc_memset8((void*)&(f.mode), M_LIVE, 1, true);
 		flash_unfresh();
 
 		// clear out some reasonable defaults
@@ -1752,13 +2250,19 @@ int main(void)
 		// 	glyph[i1] = (1<<i1);
 		// 	flashc_memcpy((void *)&flashy.glyph[i1], &glyph, sizeof(glyph), true);
 		// }
-
 	}
 	else {
 		preset_select = f.scene;
+		tele_set_val(V_SCENE, preset_select);
 		flash_read();
 		// load from flash at startup
 	}
+
+	// screen init
+	render_init();
+
+	// usb disk check
+	tele_usb_disk();
 
 	// setup daisy chain for two dacs
 	spi_selectChip(SPI,DAC_SPI);
@@ -1768,31 +2272,14 @@ int main(void)
 	spi_unselectChip(SPI,DAC_SPI);
 
 	timer_add(&clockTimer, RATE_CLOCK, &clockTimer_callback, NULL);
-	timer_add(&refreshTimer, 63, &refreshTimer_callback, NULL);
 	timer_add(&cvTimer, RATE_CV, &cvTimer_callback, NULL);
 	timer_add(&keyTimer, 71, &keyTimer_callback, NULL);
 	timer_add(&adcTimer, 61, &adcTimer_callback, NULL);
+	timer_add(&refreshTimer, 63, &refreshTimer_callback, NULL);
 	
 	metro_act = 1;
 	metro_time = 1000;
 	timer_add(&metroTimer, metro_time ,&metroTimer_callback, NULL);
-
-
-	render_init();
-
-	clear_delays();
-
-	aout[0].slew = 1;
-	aout[1].slew = 1;
-	aout[2].slew = 1;
-	aout[3].slew = 1;
-
-	status = 1;
-	mode = M_LIVE;
-	edit_line = SCRIPT_MAX_COMMANDS;
-	r_edit_dirty = R_MESSAGE | R_INPUT;
-	activity = 0;
-	activity_prev = 0xff;
 
 	update_metro = &tele_metro;
 	update_tr = &tele_tr;
@@ -1804,7 +2291,28 @@ int main(void)
 	update_ii = &tele_ii;
 	update_scene = &tele_scene;
 	update_pi = &tele_pi;
+	run_script = &tele_script;
+	update_kill = &tele_kill;
+	update_mute = &tele_mute;
+	update_input = &tele_input_state;
 
+	clear_delays();
+
+	aout[0].slew = 1;
+	aout[1].slew = 1;
+	aout[2].slew = 1;
+	aout[3].slew = 1;
+
+	for(int i=0;i<8;i++)
+		mutes[i] = 1;
+
+	status = 1;
+	error_detail[0] = 0;
+	mode = f.mode;
+	edit_line = SCRIPT_MAX_COMMANDS;
+	r_edit_dirty = R_MESSAGE | R_INPUT;
+	activity = 0;
+	activity_prev = 0xff;
 
 	for(int i=0;i<script[INIT_SCRIPT].l;i++)
 		process(&script[INIT_SCRIPT].c[i]);

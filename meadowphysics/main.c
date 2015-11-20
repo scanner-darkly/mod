@@ -674,7 +674,7 @@ static void cascades_trigger(u8 n) {
 static void mp_process_ii(uint8_t i, int d) {
 	switch(i) {
 		case MP_PRESET:
-			if(d<0 || d>8)
+			if(d<0 || d>7)
 				break;
 			preset_select = d;
 			flash_read();
@@ -697,25 +697,25 @@ static void mp_process_ii(uint8_t i, int d) {
 			}
 			break;
 		case MP_MUTE:
-			if(d<1 || d>9)
+			if(d<1 || d>8)
 				break;
 			d--;
 			m.mutes[d] = 1;
 			break;
 		case MP_UNMUTE:
-			if(d<1 || d>9)
+			if(d<1 || d>8)
 				break;
 			d--;
 			m.mutes[d] = 0;
 			break;
 		case MP_FREEZE:
-			if(d<1 || d>9)
+			if(d<1 || d>8)
 				break;
 			d--;
 			m.freezes[d] = 1;
 			break;
 		case MP_UNFREEZE:
-			if(d<1 || d>9)
+			if(d<1 || d>8)
 				break;
 			d--;
 			m.freezes[d] = 0;

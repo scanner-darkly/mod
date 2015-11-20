@@ -1757,7 +1757,7 @@ static void refresh_preset() {
 static void ww_process_ii(uint8_t i, int d) {
 	switch(i) {
 		case WW_PRESET:
-			if(d<0 || d>8)
+			if(d<0 || d>7)
 				break;
 			preset_select = d;
 			flash_read();
