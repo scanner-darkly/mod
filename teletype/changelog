@@ -32,3 +32,6 @@ v1.1	- NEW usb flash drive read/write
 		- FIX P.PUSH will fully fill a pattern
 		- FIX CV.SET followed by slewed CV in one command works
 		- FIX DEL 0 no longer voids command
+
+vNext
+		- NEW P.RM will also return the value removed

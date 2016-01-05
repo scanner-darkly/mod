@@ -1,13 +1,13 @@
 CC=gcc
-CFLAGS=-I. -I.. -I../../system -DSIM
+CFLAGS=-g -Wall -I. -I.. -I../../system -DSIM
 DEPS =
-OBJ = tt.o ../teletype.o ../table.o ../../system/util.c
+OBJ = tt.o ../teletype.o ../table.o ../../system/util.o
 
 %.o: %.c $(DEPS)
 	$(CC) -c -o $@ $< $(CFLAGS)
 
 tt: $(OBJ)
-	gcc -o $@ $^ $(CFLAGS)
+	$(CC) -o $@ $^ $(CFLAGS)
 
 clean:
 	rm *.o

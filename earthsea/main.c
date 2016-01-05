@@ -399,13 +399,12 @@ static void clockTimer_callback(void* o) {
 	if(clock_mode == 0) {
 		if(p_playing) {
 			if(p_timer == 0) {
-
-				if(p_play_pos == es.p[p_select].length && !es.p[p_select].loop) {
+				if(p_play_pos >= es.p[p_select].length && !es.p[p_select].loop) {
 					// print_dbg("\r\nPATTERN DONE");
 					p_playing = 0;
 				}
 				else {
-					if(p_play_pos == es.p[p_select].length && es.p[p_select].loop) {
+					if(p_play_pos >= es.p[p_select].length && es.p[p_select].loop) {
 						// print_dbg("\r\nLOOP");
 						p_play_pos = 0;
 						p_timer_total = 0;
@@ -436,9 +435,7 @@ static void clockTimer_callback(void* o) {
 
 					pattern_shape(es.p[p_select].e[i].shape, (u8)x, (u8)y);
 
-
 					p_play_pos++;
-
 				}
 			}
 			else p_timer--;

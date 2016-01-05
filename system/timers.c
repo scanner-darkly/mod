@@ -179,3 +179,7 @@ void timer_reset(softTimer_t* timer) {
   timer->ticksRemain = timer->ticks;
 }
 
+void timer_trigger(softTimer_t* timer) {
+  timer->ticksRemain = 1;
+}
+

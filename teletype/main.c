@@ -1593,7 +1593,7 @@ void set_mode(uint8_t m) {
 			flashc_memset8((void*)&(f.mode), mode, 1, true);
 			edit_line = SCRIPT_MAX_COMMANDS;
 			activity |= A_REFRESH;
-			r_edit_dirty |= R_LIST | R_MESSAGE;
+			r_edit_dirty |= R_ALL;
 			break;
 		case M_EDIT:
 			mode = M_EDIT;
@@ -1601,7 +1601,7 @@ void set_mode(uint8_t m) {
 			strcpy(input,print_command(&script[edit].c[edit_line]));
 			pos = strlen(input);
 			for(int n = pos;n < 32;n++) input[n] = 0;
-			r_edit_dirty |= R_LIST | R_MESSAGE;
+			r_edit_dirty |= R_ALL;
 			break;
 		case M_TRACK:
 			mode = M_TRACK;
@@ -1732,6 +1732,8 @@ static void tele_cv(uint8_t i, int16_t v, uint8_t s) {
  	}
 	
 	aout[i].a = aout[i].now<<16;
+
+	timer_trigger(&adcTimer);
 }
 
 static void tele_cv_slew(uint8_t i, int16_t v) {

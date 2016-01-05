@@ -40,6 +40,7 @@ void process_timers( void );
 
 void timer_set(softTimer_t* timer, u32 ticks);
 void timer_reset(softTimer_t* timer);
+void timer_trigger(softTimer_t* timer);
 
 // clear the list
 extern void timers_clear(void) ;

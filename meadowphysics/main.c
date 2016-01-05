@@ -1,10 +1,3 @@
-/* issues
-
-tune timing range
-refresh preset while in ext trigger mode?
-
-*/
-
 #include <stdio.h>
 
 // asf
@@ -43,39 +36,36 @@ refresh preset while in ext trigger mode?
 #define L1 8
 #define L0 4
 
-// s8 positions[8] = {3,1,2,2,3,3,5,7};
-// s8 points[8] = {3,1,2,2,3,3,5,7};
-// s8 points_save[8] = {3,1,2,2,3,3,5,7};
-// u8 triggers[8] = {0,0,0,0,0,0,0,0};
-// u8 trig_dests[8] = {0,0,0,0,0,0,0,0};
-// u8 rules[8] = {0,0,0,0,0,0,0,0};
-// u8 rule_dests[8] = {0,1,2,3,4,5,6,7};
-
 u8 edit_row, key_count = 0, mode = 0, prev_mode = 0;
 s8 kcount = 0;
+s8 scount[8] = {0,0,0,0,0,0,0,0};
 
 const u8 sign[8][8] = {{0,0,0,0,0,0,0,0},         // o
-       {0,24,24,126,126,24,24,0},     // +
-       {0,0,0,126,126,0,0,0},       // -
-       {0,96,96,126,126,96,96,0},     // >
-       {0,6,6,126,126,6,6,0},       // <
-       {0,102,102,24,24,102,102,0},   // * rnd
-       {0,120,120,102,102,30,30,0},   // <> up/down
-       {0,126,126,102,102,126,126,0}};  // [] return
+       {0,24,24,126,126,24,24,0},     			// +
+       {0,0,0,126,126,0,0,0},       			// -
+       {0,96,96,126,126,96,96,0},     			// >
+       {0,6,6,126,126,6,6,0},       			// <
+       {0,102,102,24,24,102,102,0},   			// * rnd
+       {0,120,120,102,102,30,30,0},   			// <> up/down
+       {0,126,126,102,102,126,126,0}};  		// [] sync
 
 const u8 outs[8] = {B00, B01, B02, B03, B04, B05, B06, B07};
 
+u8 state[8] = {0,0,0,0,0,0,0,0};
+u8 clear[8] = {0,0,0,0,0,0,0,0};
 
 typedef struct {
-	s8 positions[8];
-	s8 points[8];
-	s8 points_save[8];
-	u8 triggers[8];
-	u8 trig_dests[8];
+	u8 count[8];		// length of cycle
+	s8 position[8];		// current position in cycle
+	u8 speed[8];		// speed of cycle
+	u8 tick[8]; 		// position in speed countdown
+	u8 min[8];
+	u8 max[8];
+	u8 trigger[8];
+	u8 toggle[8];
 	u8 rules[8];
 	u8 rule_dests[8];
-	u8 mutes[8];
-	u8 freezes[8];
+	u8 sync[8]; 		// if true, reset dest rule to count
 } mp_set;
 
 typedef const struct {
@@ -140,9 +130,6 @@ void flash_read(void);
 static void mp_process_ii(uint8_t i, int d);
 
 
-static void cascades_trigger(u8 n);
-
-
 
 ////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
@@ -156,32 +143,90 @@ void clock(u8 phase) {
 	if(phase) {
 		gpio_set_gpio_pin(B10);
 
-		// clear last round
-		for(i=0;i<8;i++)
-			m.triggers[i] = 0;
-
-		// main
-		if(!m.freezes[0])
-			cascades_trigger(0);
-
-		// ensure bounds, output triggers
 		for(i=0;i<8;i++) {
-			if(m.positions[i] < 0)
-				m.positions[i] = 0;
-			else if(m.positions[i] > m.points[i])
-				m.positions[i] = m.points[i];
+			if(m.tick[i] == 0) {
+				m.tick[i] = m.speed[i];
+				if(m.position[i] == 0) {
+					// RULES
+				    if(m.rules[i] == 1) {     // inc
+				    	m.count[m.rule_dests[i]]++;
+				    	if(m.count[m.rule_dests[i]] > m.max[m.rule_dests[i]]) {
+				    		m.count[m.rule_dests[i]] = m.min[m.rule_dests[i]];
+				    	}
+				    }
+				    else if(m.rules[i] == 2) {  // dec
+			    		m.count[m.rule_dests[i]]--;
+				    	if(m.count[m.rule_dests[i]] < m.min[m.rule_dests[i]]) {
+				    		m.count[m.rule_dests[i]] = m.max[m.rule_dests[i]];
+				    	}
+				    }
+				    else if(m.rules[i] == 3) {  // max
+				    	m.count[m.rule_dests[i]] = m.max[m.rule_dests[i]];
+				    }
+				    else if(m.rules[i] == 4) {  // min
+				    	m.count[m.rule_dests[i]] = m.min[m.rule_dests[i]];
+				    }
+				    else if(m.rules[i] == 5) {  // rnd
+				    	m.count[m.rule_dests[i]] = 
+				    	(rnd() % (m.max[m.rule_dests[i]] - m.min[m.rule_dests[i]] + 1)) + m.min[m.rule_dests[i]];
 
-			// send out
-			if(m.triggers[i] && !m.mutes[i])
-				gpio_set_gpio_pin(outs[i]);
+				      // print_dbg("\r\n RANDOM: ");
+				      // print_dbg_hex(m.count[m.rule_dests[i]]);
+				      // print_dbg_hex(rnd() % 11);
+				    }
+				    else if(m.rules[i] == 6) {  // pole
+				    	if(abs(m.count[m.rule_dests[i]] - m.min[m.rule_dests[i]]) < 
+				    		abs(m.count[m.rule_dests[i]] - m.max[m.rule_dests[i]]) ) {
+				    		m.count[m.rule_dests[i]] = m.max[m.rule_dests[i]];
+				    	}
+				    	else {
+				    		m.count[m.rule_dests[i]] = m.min[m.rule_dests[i]];
+				    	}
+				    }
+				    else if(m.rules[i] == 7) {  // stop
+				    	m.position[m.rule_dests[i]] = -1;
+				    }
+
+					m.position[i]--;
+
+					for(int n=0;n<8;n++) {
+						if(m.sync[i] & (1<<n)) {
+							m.position[n] = m.count[n];
+							m.tick[n] = m.speed[n];
+						}
+
+						if(m.trigger[i] & (1<<n)) {
+							state[n] = 1;
+							clear[n] = 1;
+						}
+						else if(m.toggle[i] & (1<<n)) {
+							state[n] ^= 1;
+						}
+					}
+				}
+				else if(m.position[i] > 0) m.position[i]--;
+			}
+			else m.tick[i]--;
 		}
+
+		for(i=0;i<8;i++)
+			if(state[i])
+				gpio_set_gpio_pin(outs[i]);
+			else
+				gpio_clr_gpio_pin(outs[i]);
 
 		monomeFrameDirty++;
 	}
 	else {
-		for(i=0;i<8;i++) gpio_clr_gpio_pin(outs[i]);
-
 		gpio_clr_gpio_pin(B10);
+
+		for(i=0;i<8;i++) {
+			if(clear[i]) {
+				gpio_clr_gpio_pin(outs[i]);
+				state[i] = 0;
+			}
+			clear[i] = 0;
+		}
  	}
 }
 
@@ -295,22 +340,6 @@ static void handler_MonomeRefresh(s32 data) {
 	}
 }
 
-
-static void handler_Front(s32 data) {
-	print_dbg("\r\n FRONT HOLD");
-
-	if(data == 0) {
-		front_timer = 15;
-		if(preset_mode) preset_mode = 0;
-		else preset_mode = 1;
-	}
-	else {
-		front_timer = 0;
-	}
-
-	monomeFrameDirty++;
-}
-
 static void handler_PollADC(s32 data) {
 	u16 i;
 	adc_convert(&adc);
@@ -327,6 +356,21 @@ static void handler_PollADC(s32 data) {
 		timer_set(&clockTimer, clock_time);
 	}
 	clock_temp = i;
+}
+
+static void handler_Front(s32 data) {
+	print_dbg("\r\n FRONT HOLD");
+
+	if(data == 0) {
+		front_timer = 15;
+		if(preset_mode) preset_mode = 0;
+		else preset_mode = 1;
+	}
+	else {
+		front_timer = 0;
+	}
+
+	monomeFrameDirty++;
 }
 
 static void handler_SaveFlash(s32 data) {
@@ -439,7 +483,6 @@ static void handler_MonomeGridKey(s32 data) {
 	}
 	// NOT PRESET
 	else {
-
 		prev_mode = mode;
 
 		// mode check
@@ -454,56 +497,85 @@ static void handler_MonomeGridKey(s32 data) {
 
 			if(kcount == 1 && z == 1)
 				mode = 1; 
-			else if(kcount == 0)
+			else if(kcount == 0) {
 				mode = 0;
+				scount[y] = 0;	
+			}
 
 			if(z == 1 && mode == 1) {
 				edit_row = y;
-				monomeFrameDirty++;
 			}
 		}
 		else if(x == 1 && mode != 0) {
-			if(mode == 1 && z == 1)
+			if(mode == 1 && z == 1) {
 				mode = 2;
+				edit_row = y;
+			}
 			else if(mode == 2 && z == 0)
 				mode = 1;
 		}
-		else if(mode == 0 && z == 1) {
-			m.points[y] = x;
-			m.points_save[y] = x;
-			m.positions[y] = x;
-			monomeFrameDirty++;
-		}
-		else if(mode == 1 && z == 1) {
-			if(x > 1 && x < 7) {
-				if(y != edit_row) {    // filter out self-triggering
-					m.trig_dests[edit_row] ^= (1<<y);
-					monomeFrameDirty++;
-				  // post("\ntrig_dests", edit_row, ":", trig_dests[edit_row]);
+		// set position / minmax / stop
+		else if(mode == 0) {
+			scount[y] += (z<<1)-1;
+			if(scount[y]<0) scount[y] = 0;		// in case of grid glitch?
+
+			if(z == 1 && scount[y] == 1) {
+				m.position[y] = x;
+				m.count[y] = x;
+				m.min[y] = x;
+				m.max[y] = x;
+				m.tick[y] = m.speed[y];
+			}
+			else if(z == 1 && scount[y] == 2) {
+				if(x < m.count[y]) {
+					m.min[y] = x;
+					m.max[y] = m.count[y];
+				}
+				else {
+					m.max[y] = x;
+					m.min[y] = m.count[y];
 				}
 			}
-			else if(x == 15)
-				m.freezes[y] ^= 1;
-			else if(x == 14)
-				m.mutes[y] ^= 1;
+		}
+		// set speeds and trig/tog
+		else if(mode == 1 && z == 1) {
+			
+			if(x > 7) {
+				m.speed[y] = x-8;
+				m.tick[y] = m.speed[y];
+			}
+			else if(x == 5) {
+				m.toggle[edit_row] ^= 1<<y;
+				m.trigger[edit_row] &= ~(1<<y);
+			}
+			else if(x == 6) {
+				m.trigger[edit_row] ^= 1<<y;
+				m.toggle[edit_row] &= ~(1<<y);
+			}
+			else if(x == 2) {
+				if(m.position[y] == -1) {
+					m.position[y] = m.count[y];
+				}
+				else {
+					m.position[y] = -1;
+				}
+			}
+			else if(x == 3) {
+				m.sync[edit_row] ^= (1<<y);
+			}
 		}
 		else if(mode == 2 && z == 1) {
-			if(x > 1 && x < 7) {
+			if(x > 4 && x < 7) {
 				m.rule_dests[edit_row] = y;
-				monomeFrameDirty++;
 			  // post("\nrule_dests", edit_row, ":", rule_dests[edit_row]);
 			}
 			else if(x > 6) {
 				m.rules[edit_row] = y;
-				monomeFrameDirty++;
 			  // post("\nrules", edit_row, ":", rules[edit_row]);
 			}
 		}
 
-		if(mode != prev_mode) {
-			monomeFrameDirty++;
-			// post("\nnew mode", mode);
-		}
+		monomeFrameDirty++;
 	}
 }
 
@@ -516,48 +588,58 @@ static void refresh() {
 	for(i1=0;i1<128;i1++)
 		monomeLedBuffer[i1] = 0;
 
-	// SET POSITIONS
+	// SHOW POSITIONS
 	if(mode == 0) {
 		for(i1=0;i1<8;i1++) {
-			for(i2=m.positions[i1];i2<=m.points[i1];i2++)
-				monomeLedBuffer[i1*16 + i2] = L1;
-
-			monomeLedBuffer[i1*16 + m.positions[i1]] = L2;
+			for(i2=m.min[i1];i2<=m.max[i1];i2++)
+				monomeLedBuffer[i1*16 + i2] = L0;
+			monomeLedBuffer[i1*16 + m.count[i1]] = L1;
+			if(m.position[i1] >= 0) {
+				monomeLedBuffer[i1*16 + m.position[i1]] = L2;
+			}
 		}
 	}
-	// SET ROUTING
+	// SHOW SPEED
 	else if(mode == 1) {
 		for(i1=0;i1<8;i1++) {
-			if((m.trig_dests[edit_row] & (1<<i1)) != 0) {
-				for(i2=0;i2<=m.points[i1];i2++)
-					monomeLedBuffer[i1*16 + i2] = L0;
-				monomeLedBuffer[i1*16 + m.positions[i1]] = L2;
-			}
+			if(m.position[i1] >= 0)
+				monomeLedBuffer[i1*16 + m.position[i1]] = L0;
+
+			monomeLedBuffer[i1*16 + m.speed[i1]+8] = L1;
+
+			if(m.toggle[edit_row] & (1 << i1))
+				monomeLedBuffer[i1*16 + 5] = L2;
 			else
-				monomeLedBuffer[i1*16 + m.positions[i1]] = L0;
+				monomeLedBuffer[i1*16 + 5] = L0;
 
-			if(m.freezes[i1])
-				monomeLedBuffer[i1*16+15] = L2;
-			if(m.mutes[i1])
-				monomeLedBuffer[i1*16+14] = L1;
+			if(m.trigger[edit_row] & (1 << i1))
+				monomeLedBuffer[i1*16 + 6] = L2;
+			else
+				monomeLedBuffer[i1*16 + 6] = L0;
 
+			if(m.sync[edit_row] & (1<<i1))
+				monomeLedBuffer[i1*16 + 3] = L1;
+			else  
+				monomeLedBuffer[i1*16 + 3] = L0;
 		}
 
 		monomeLedBuffer[edit_row * 16] = L2;
 	}
-	// SET RULES
+	// SHOW RULES
 	else if(mode == 2) {
+		for(i1=0;i1<8;i1++) 
+			if(m.position[i1] >= 0)
+				monomeLedBuffer[i1*16 + m.position[i1]] = L0;
+
 		monomeLedBuffer[edit_row * 16] = L1;
 		monomeLedBuffer[edit_row * 16 + 1] = L1;
 
-		for(i1=2;i1<7;i1++)
-			monomeLedBuffer[m.rule_dests[edit_row] * 16 + i1] = L2;
+		monomeLedBuffer[m.rule_dests[edit_row] * 16 + 5] = L2;
+		monomeLedBuffer[m.rule_dests[edit_row] * 16 + 6] = L2;
 
 		for(i1=8;i1<16;i1++)
 			monomeLedBuffer[m.rules[edit_row] * 16 + i1] = L0;
 
-		for(i1=0;i1<8;i1++) 
-			monomeLedBuffer[i1*16 + m.positions[i1]] = L0;
 
 		for(i1=0;i1<8;i1++) {
 			i3 = sign[m.rules[edit_row]][i1];
@@ -566,8 +648,6 @@ static void refresh() {
 					monomeLedBuffer[i1*16 + 8 + i2] = L2;
 			}
 		}
-
-		monomeLedBuffer[m.rules[edit_row] * 16 + 7] = L2;
 	}
 
 	monome_set_quadrant_flag(0);
@@ -601,76 +681,6 @@ static void refresh_preset() {
 	monome_set_quadrant_flag(1);
 }
 
-
-
-static void cascades_trigger(u8 n) {
-  u8 i;
-
-  m.positions[n]--;
-
-  // ****** the trigger # check is so we don't cause a trigger/rules multiple times per NEXT
-  // a rules-based jump to position-point does not current cause a trigger. should it?
-  if(m.positions[n] < 0 && m.triggers[n] == 0) {
-    m.triggers[n]++;
-  
-    if(m.rules[n] == 1) {     // inc
-      if(m.points[m.rule_dests[n]] < (LENGTH)) {
-        m.points[m.rule_dests[n]]++;
-        // m.positions[m.rule_dests[n]] = m.points[m.rule_dests[n]];
-      }
-    }
-    else if(m.rules[n] == 2) {  // dec
-      if(m.points[m.rule_dests[n]] > 0) {
-        m.points[m.rule_dests[n]]--;
-        // m.positions[m.rule_dests[n]] = m.points[m.rule_dests[n]];
-      }
-    }
-    else if(m.rules[n] == 3) {  // max
-      m.points[m.rule_dests[n]] = (LENGTH);
-      // m.positions[m.rule_dests[n]] = m.points[m.rule_dests[n]];
-    }
-    else if(m.rules[n] == 4) {  // min
-      m.points[m.rule_dests[n]] = 0;
-      // m.positions[m.rule_dests[n]] = m.points[m.rule_dests[n]];
-    }
-    else if(m.rules[n] == 5) {  // rnd
-      m.points[m.rule_dests[n]] = rnd() % SIZE;
-      
-      // print_dbg("\r\n RANDOM: ");
-      // print_dbg_hex(m.points[m.rule_dests[n]]);
-      // print_dbg_hex(rnd() % 11);
-
-      // m.positions[m.rule_dests[n]] = m.points[m.rule_dests[n]];
-    }
-    else if(m.rules[n] == 6) {  // up/down
-      m.points[m.rule_dests[n]] += rnd() % 3;
-      m.points[m.rule_dests[n]]--;
-
-
-      if(m.points[m.rule_dests[n]] < 0) m.points[m.rule_dests[n]] = 0;
-      else if(m.points[m.rule_dests[n]] > (LENGTH)) m.points[m.rule_dests[n]] = LENGTH;
-      // m.positions[m.rule_dests[n]] = m.points[m.rule_dests[n]];  
-
-      // print_dbg("\r\n WANDER: ");
-      // print_dbg_hex(m.points[m.rule_dests[n]]);   
-    }
-    else if(m.rules[n] == 7) {  // return
-      m.points[m.rule_dests[n]] = m.points_save[m.rule_dests[n]];
-    }
-
-
-    //reset
-    m.positions[n] += m.points[n] + 1;
-
-    //triggers
-    for(i=0;i<8;i++)
-      if(((m.trig_dests[n] & (1<<i)) != 0) && !m.freezes[i])
-        cascades_trigger(i);
-        // post("\ntrigger",n," -> ", m);
-  }
-}
-
-
 static void mp_process_ii(uint8_t i, int d) {
 	switch(i) {
 		case MP_PRESET:
@@ -680,45 +690,27 @@ static void mp_process_ii(uint8_t i, int d) {
 			flash_read();
 			break;
 		case MP_RESET:
-			if(d) {
-				m.positions[0] = m.points[0]+1;
-				for(int n=1;n<8;n++)
-					m.positions[n] = m.points[n];
+			if(d>0 && d<9) {
+				d--;
+				m.position[d] = m.count[d];
+				m.tick[d] = m.speed[d];
+			}
+			else if(d==0) {
+				for(int n=0;n<8;n++) {
+					m.position[n] = m.count[n];
+					m.tick[n] = m.speed[n];
+				}
 			}
 			break;
-		case MP_SYNC:
-			if(d) {
-				m.positions[0] = m.points[0]+1;
-				for(int n=1;n<8;n++)
-					m.positions[n] = m.points[n];
-				timer_set(&clockTimer,clock_time);
-				clock_phase = 1;
-				(*clock_pulse)(clock_phase);
+		case MP_STOP:
+			if(d>0 && d<9) {
+				d--;
+				m.position[d] = -1;
 			}
-			break;
-		case MP_MUTE:
-			if(d<1 || d>8)
-				break;
-			d--;
-			m.mutes[d] = 1;
-			break;
-		case MP_UNMUTE:
-			if(d<1 || d>8)
-				break;
-			d--;
-			m.mutes[d] = 0;
-			break;
-		case MP_FREEZE:
-			if(d<1 || d>8)
-				break;
-			d--;
-			m.freezes[d] = 1;
-			break;
-		case MP_UNFREEZE:
-			if(d<1 || d>8)
-				break;
-			d--;
-			m.freezes[d] = 0;
+			else if(d==0) {
+				for(int n=0;n<8;n++)
+					m.position[n] = -1;
+			}
 			break;
 		default:
 			break;
@@ -738,10 +730,9 @@ static void mp_process_ii(uint8_t i, int d) {
 // assign event handlers
 static inline void assign_main_event_handlers(void) {
 	app_event_handlers[ kEventFront ]	= &handler_Front;
-	// app_event_handlers[ kEventTimer ]	= &handler_Timer;
-	app_event_handlers[ kEventPollADC ]	= &handler_PollADC;
 	app_event_handlers[ kEventKeyTimer ] = &handler_KeyTimer;
 	app_event_handlers[ kEventSaveFlash ] = &handler_SaveFlash;
+	app_event_handlers[ kEventPollADC ]	= &handler_PollADC;
 	app_event_handlers[ kEventClockNormal ] = &handler_ClockNormal;
 	app_event_handlers[ kEventFtdiConnect ]	= &handler_FtdiConnect ;
 	app_event_handlers[ kEventFtdiDisconnect ]	= &handler_FtdiDisconnect ;
@@ -811,19 +802,19 @@ void flash_read(void) {
 	// }
 
 	for(i1=0;i1<8;i1++) {
-		m.positions[i1] = flashy.m[preset_select].positions[i1];
-		m.points[i1] = flashy.m[preset_select].points[i1];
-		m.points_save[i1] = flashy.m[preset_select].points_save[i1];
-		m.triggers[i1] = flashy.m[preset_select].triggers[i1];
-		m.trig_dests[i1] = flashy.m[preset_select].trig_dests[i1];
+		m.count[i1] = flashy.m[preset_select].count[i1];
+		m.position[i1] = flashy.m[preset_select].position[i1];
+		m.speed[i1] = flashy.m[preset_select].speed[i1];
+		m.tick[i1] = flashy.m[preset_select].tick[i1];
+		m.min[i1] = flashy.m[preset_select].min[i1];
+		m.max[i1] = flashy.m[preset_select].max[i1];
+		m.trigger[i1] = flashy.m[preset_select].trigger[i1];
+		m.toggle[i1] = flashy.m[preset_select].toggle[i1];
 		m.rules[i1] = flashy.m[preset_select].rules[i1];
 		m.rule_dests[i1] = flashy.m[preset_select].rule_dests[i1];
+		m.sync[i1] = flashy.m[preset_select].sync[i1];
 	}
 }
-
-
-
-
 
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -870,17 +861,18 @@ int main(void) {
 
 		// clear out some reasonable defaults
 		for(i1=0;i1<8;i1++) {
-			m.positions[i1] = i1;
-			m.points[i1] = i1;
-			m.points_save[i1] = i1;
-			m.triggers[i1] = 0;
-			m.trig_dests[i1] = 0;
-			m.rules[i1] = 0;
+			m.count[i1] = 7;
+			m.position[i1] = 7;
+			m.speed[i1] = 0;
+			m.tick[i1] = 0;
+			m.min[i1] = 7;
+			m.max[i1] = 7;
+			m.trigger[i1] = (1<<i1);
+			m.toggle[i1] = 0;
+			m.rules[i1] = 1;
 			m.rule_dests[i1] = i1;
+			m.sync[i1] = (1<<i1);
 		}
-
-		m.positions[0] = m.points[0] = 3;
-		m.trig_dests[0] = 254;
 
 		// save all presets, clear glyphs
 		for(i1=0;i1<8;i1++) {
@@ -911,13 +903,6 @@ int main(void) {
 	timer_add(&keyTimer,50,&keyTimer_callback, NULL);
 	timer_add(&adcTimer,100,&adcTimer_callback, NULL);
 	clock_temp = 10000; // out of ADC range to force tempo
-
-	// setup daisy chain for two dacs
-	// spi_selectChip(SPI,DAC_SPI);
-	// spi_write(SPI,0x80);
-	// spi_write(SPI,0xff);
-	// spi_write(SPI,0xff);
-	// spi_unselectChip(SPI,DAC_SPI);
 
 	while (true) {
 		check_events();
