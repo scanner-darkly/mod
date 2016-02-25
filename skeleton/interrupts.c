@@ -30,6 +30,11 @@ static const u64 tcMaxInv = (u64)0x10000000;
 volatile clock_pulse_t clock_pulse = &clock_null;
 volatile u8 clock_external;
 
+volatile u64 last_external_ticks = 0;
+volatile u32 external_clock_pulse_width = 10;
+volatile u32 external_taps[AVERAGING_TAPS] = {500, 500, 500};
+volatile u8 external_taps_index = 0, external_taps_count = 0;
+
 //----------------------
 //---- static functions 
 // interrupt handlers
@@ -102,6 +107,11 @@ static void irq_port1_line1(void) {
       static event_t e;
       e.type = kEventClockNormal;
       e.data = !gpio_get_pin_value(B09);
+	  if (!gpio_get_pin_value(B09)) {
+		  last_external_ticks = 0;
+		  external_clock_pulse_width = 10;
+		  external_taps_index = external_taps_count = 0;
+	  } 
       event_post(&e);
 
       gpio_clear_pin_interrupt_flag(B09);
@@ -112,6 +122,19 @@ static void irq_port1_line1(void) {
       // CLOCK BOUNCY WITHOUT THESE PRINTS
       print_dbg("\rclk: ");
       print_dbg_ulong(gpio_get_pin_value(B08));
+	  
+	  u64 elapsed = last_external_ticks < tcTicks ? tcTicks - last_external_ticks : tcMax - last_external_ticks + tcTicks;
+	  if (gpio_get_pin_value(B08)) {
+		  if (last_external_ticks != 0) {
+			  if (elapsed < (u64)3600000) {
+				  external_taps[external_taps_index] = elapsed;
+				  if (++external_taps_index >= AVERAGING_TAPS) external_taps_index = 0;
+				  if (external_taps_count < AVERAGING_TAPS) external_taps_count++;
+			  }
+		  }
+		  last_external_ticks = tcTicks;
+	  } else external_clock_pulse_width = elapsed;
+	  
       (*clock_pulse)(gpio_get_pin_value(B08));
       gpio_clear_pin_interrupt_flag(B08);
     }
@@ -145,4 +168,12 @@ void register_interrupts(void) {
 
   // register uart interrupt
   // INTC_register_interrupt(&irq_usart, AVR32_USART0_IRQ, UI_IRQ_PRIORITY);
+}
+
+
+u32 get_external_clock_average(void) {
+	if (external_taps_count == 0) return 500;
+	u64 total = 0;
+	for (u8 i = 0; i < external_taps_count; i++) total += external_taps[i];
+	return total / (u64)external_taps_count;
 }

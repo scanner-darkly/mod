@@ -69,6 +69,9 @@ const u16 SCALES[24][16] = {
 
 };
 
+#define CLOCK_DIV_MULT_COUNT 15
+const s8 CLOCK_DIV_MULT[CLOCK_DIV_MULT_COUNT] = {-8, -7, -6, -5, -4, -3, -2, 1, 2, 3, 4, 5, 6, 7, 8};
+
 typedef enum {
 	mTrig, mMap, mSeries
 } edit_modes;
@@ -134,7 +137,10 @@ u16 clip;
 u16 *param_dest;
 u8 quantize_in;
 
-u8 clock_phase;
+u8 clock_interval_index = 0;
+s8 clock_div_mult = 1;
+// array size must be == the biggest clock mult/div * 2
+u32 clock_intervals[16] = {120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120};
 u16 clock_time, clock_temp;
 u8 series_step;
 
@@ -151,7 +157,6 @@ static nvram_data_t flashy;
 
 
 
-
 ////////////////////////////////////////////////////////////////////////////////
 // prototypes
 
@@ -159,6 +164,8 @@ static void refresh(void);
 static void refresh_mono(void);
 static void refresh_preset(void);
 static void clock(u8 phase);
+static void external_clock(u8 phase);
+static void recalculate_clock_intervals(void);
 
 // start/stop monome polling/refresh timers
 extern void timers_set_monome(void);
@@ -446,7 +453,6 @@ void clock(u8 phase) {
 }
 
 
-
 ////////////////////////////////////////////////////////////////////////////////
 // timers
 
@@ -456,19 +462,55 @@ static softTimer_t adcTimer = { .next = NULL, .prev = NULL };
 static softTimer_t monomePollTimer = { .next = NULL, .prev = NULL };
 static softTimer_t monomeRefreshTimer  = { .next = NULL, .prev = NULL };
 
+void recalculate_clock_intervals(void) {
+	u32 average = get_external_clock_average();
+	u32 pulse = external_clock_pulse_width;
+	u32 interval = average / (u32)clock_div_mult;
+	u32 remainder = average % (u32)clock_div_mult;
+	if (pulse > (interval >> 1)) pulse = interval >> 1;
+	if (pulse == 0) pulse = 1;
+	
+	for (u8 i = 0; i < (clock_div_mult << 1); i += 2) {
+		clock_intervals[i] = pulse;
+		clock_intervals[i + 1] = interval - pulse;
+	}
+	// TODO spread remainder evenly
+	clock_time = get_external_clock_average();
+	timer_reset(&clockTimer, clock_intervals[0]);
+	clock_interval_index = 1;
+}
 
+void external_clock(u8 phase) {
+	if (clock_div_mult == 1) {
+		clock(phase);
+		return;
+	}
+		
+	if (clock_div_mult < 0) {
+		if (clock_interval_index < 2) clock(phase);
+		if (++clock_interval_index >= (abs(clock_div_mult) << 1)) clock_interval_index = 0;
+		return;
+	}
+	
+	if (!phase) return;
+	
+	recalculate_clock_intervals();
+	clock(1);
+}
 
 static void clockTimer_callback(void* o) {  
 	// static event_t e;
 	// e.type = kEventTimer;
 	// e.data = 0;
 	// event_post(&e);
-	if(clock_external == 0) {
-		// print_dbg("\r\ntimer.");
 
-		clock_phase++;
-		if(clock_phase>1) clock_phase=0;
-		(*clock_pulse)(clock_phase);
+	if (!clock_external) {
+		clock_interval_index = !clock_interval_index;
+		clock(clock_interval_index);
+	} else if (clock_div_mult > 1 && clock_interval_index) {
+		timer_reset(&clockTimer, clock_intervals[clock_interval_index]);
+		if (++clock_interval_index >= (clock_div_mult << 1)) clock_interval_index = 0;
+		clock(clock_interval_index & 1);
 	}
 }
 
@@ -586,15 +628,23 @@ static void handler_PollADC(s32 data) {
 	adc_convert(&adc);
 
 	// CLOCK POT INPUT
-	i = adc[0];
-	i = i>>2;
+	i = adc[0] >> 2; // 0..1023
 	if(i != clock_temp) {
-		// 1000ms - 24ms
-		clock_time = 25000 / (i + 25);
-		// print_dbg("\r\nnew clock (ms): ");
-		// print_dbg_ulong(clock_time);
-
-		timer_set(&clockTimer, clock_time);
+		if (clock_external) {
+			u16 div_index = ((i * 15) >> 10); // should be 0..14
+			if (div_index >= CLOCK_DIV_MULT_COUNT) div_index = CLOCK_DIV_MULT_COUNT - 1;
+			if (clock_div_mult != CLOCK_DIV_MULT[div_index]) {
+				clock_div_mult = CLOCK_DIV_MULT[div_index];
+				clock_interval_index = clock_interval_index & 1;
+			}
+		} else {
+			// 1000ms - 24ms
+			clock_time = 25000 / (i + 25);
+			// print_dbg("\r\nnew clock (ms): ");
+			// print_dbg_ulong(clock_time);
+			
+			timer_set(&clockTimer, clock_time);
+		}
 	}
 	clock_temp = i;
 
@@ -702,6 +752,8 @@ static void handler_KeyTimer(s32 data) {
 
 static void handler_ClockNormal(s32 data) {
 	clock_external = !gpio_get_pin_value(B09); 
+	clock_temp = 10000;
+	clock_interval_index = 0;
 }
 
 
@@ -1774,9 +1826,9 @@ static void ww_process_ii(uint8_t i, int d) {
 				break;
 			next_pos = d;
 			cut_pos++;
+			clock_interval_index = 0;
 			timer_set(&clockTimer,clock_time);
-			clock_phase = 1;
-			(*clock_pulse)(clock_phase);
+			(*clock_pulse)(1);
 			break;
 		case WW_START:
 			if(d<0 || d>15)
@@ -2060,12 +2112,14 @@ int main(void)
 
 	process_ii = &ww_process_ii;
 
-	clock_pulse = &clock;
+	clock_pulse = &external_clock;
 	clock_external = !gpio_get_pin_value(B09);
 
 	timer_add(&clockTimer,120,&clockTimer_callback, NULL);
 	timer_add(&keyTimer,50,&keyTimer_callback, NULL);
 	timer_add(&adcTimer,100,&adcTimer_callback, NULL);
+	
+	clock_interval_index = 0;
 	clock_temp = 10000; // out of ADC range to force tempo
 
 	// setup daisy chain for two dacs
