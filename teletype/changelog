@@ -35,3 +35,5 @@ v1.1	- NEW usb flash drive read/write
 
 vNext
 		- NEW P.RM will also return the value removed
+		- IMP A TR.TIME of 0 will disable the pulse
+

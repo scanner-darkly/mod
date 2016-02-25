@@ -227,7 +227,7 @@ static tele_var_t tele_vars[VARS] = {
 };
 
 static void v_M(uint8_t n) {
-	if(left || left || top == 0)
+	if(left || top == 0)
 		push(tele_vars[V_M].v);
 	else {
 		tele_vars[V_M].v = pop();
@@ -535,7 +535,7 @@ static void a_CV_OFF(uint8_t i) {
 }
 static void a_TR_TIME(uint8_t i) {
 	int16_t a = pop();
-	if(a<1) a = 1;
+	if(a<0) a = 0; // 0 = no pulse
 	tele_arrays[4].v[i] = a;
 }
 static void a_TR_POL(uint8_t i) {
@@ -1166,8 +1166,10 @@ static void op_TR_PULSE() {
 	if(a < 1) a = 1;
 	else if(a > 4) a = 4;
 	a--;
+	int16_t time = tele_arrays[4].v[a]; // pulse time
+	if (time <= 0) return; // if time <= 0 don't do anything
 	tele_arrays[0].v[a] = tele_arrays[5].v[a];
-	tr_pulse[a] = tele_arrays[4].v[a]; // set time
+	tr_pulse[a] = time; // set time
 	update_tr(a,tele_arrays[0].v[a]);
 }
 static void op_II() {

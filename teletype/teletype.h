@@ -1,6 +1,8 @@
 #ifndef _TELETYPE_H_
 #define _TELETYPE_H_
 
+#include <stdint.h>
+
 #define SCRIPT_MAX_COMMANDS 6
 #define SCRIPT_MAX_COMMANDS_ 5
 #define COMMAND_MAX_LENGTH 12
